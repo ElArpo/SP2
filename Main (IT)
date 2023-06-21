@@ -1,0 +1,267 @@
+import tkinter as tk
+from tkinter import ttk
+import sqlite3
+from tkinter import messagebox
+from tkinter import simpledialog
+import threading
+import serial
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import time
+
+
+class ListManager:
+    def __init__(self):
+        self.liste1 = []
+        self.liste2 = []
+        self.lock = threading.Lock()
+        self.queue = threading.Condition(lock=self.lock)
+    def add(self, data):
+        with self.lock:
+            self.liste1.extend(data)
+            if len(self.liste1) >= 500:
+                data_to_pass = self.liste1[:500]
+                self.liste1 = self.liste1[500:]
+                self.liste2.extend(data_to_pass)
+                self.queue.notify()
+
+    def get(self):
+        with self.lock:
+            while not self.liste2:
+                self.queue.wait()
+            data_to_return = self.liste2.copy()
+            self.liste2.clear()
+            return data_to_return
+
+
+
+
+class Sensor(threading.Thread):
+    def __init__(self):
+        super(Sensor, self).__init__()
+        self.data_points = []
+        self.lock = threading.Lock()
+        self.list_manager = ListManager()
+        self.database_thread = Databaseklasse(self.list_manager)
+
+    def run(self):
+        self.database_thread.start()
+        arduino_data = ArduinoData()
+        while True:
+            data = arduino_data.read_data()
+            self.add_data(data)
+
+    def add_data(self, data):
+        with self.lock:
+            self.data_points.extend(data)
+            if len(self.data_points) >= 500:
+                data_to_send = self.data_points[:500]
+                self.data_points = self.data_points[500:]
+                self.list_manager.add(data_to_send)
+
+
+
+
+class Databaseklasse(threading.Thread):
+    def __init__(self, list_manager):
+        super(Databaseklasse, self).__init__()
+        self.list_manager = list_manager
+        self.running = threading.Event()
+
+    def run(self):
+        self.running.set()
+        while self.running.is_set():
+            data_points_copy = self.list_manager.get()
+            self.save_to_database(data_points_copy)
+
+    def save_to_database(self, data_points):
+        connection = sqlite3.connect('ekg_list.db')
+        cursor = connection.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS ekg_data (id INTEGER PRIMARY KEY AUTOINCREMENT, data_point INTEGER)")
+        for data_point in data_points:
+            cursor.execute("INSERT INTO ekg_data (data_point) VALUES (?)", (data_point,))
+        connection.commit()
+        connection.close()
+    def stop(self):
+        self.running.clear()
+
+
+
+class ArduinoData:
+    def __init__(self):
+        self.serial_port = serial.Serial('COM3', 38400)
+
+    def read_data(self):
+        data = []
+        while len(data) < 500:
+            line = self.serial_port.readline().decode().strip()
+            try:
+                value = int(line)
+                data.append(value)
+            except ValueError:
+                pass
+        return data
+class Grafklasse:
+    def __init__(self, list_manager):
+        self.list_manager = list_manager
+        self.root = tk.Tk()
+        self.fig, self.ax = plt.subplots()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.get_tk_widget().pack()
+
+    def start(self):
+        self.plot_thread = threading.Thread(target=self.update_plot)
+        self.plot_thread.start()
+        self.root.mainloop()
+
+    def update_plot(self):
+        while True:
+            data = self.list_manager.get()
+            self.ax.clear()
+            self.ax.plot(data)
+            self.canvas.draw()
+            self.root.update()
+
+
+
+
+
+class Mainvindue(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("EKG System")
+        self.geometry(f"{400}x{400}")
+        # indstiller standart framen
+
+        self.frame = ttk.Frame(self)
+        self.frame.pack(fill='both', expand=True)
+
+        self.logind_frame = ttk.Frame(self.frame)
+        self.logind_frame.pack(fill='both', expand=True)
+        #Frame til login siden
+        self.label_lægeid = ttk.Label(self.logind_frame, text="Læge ID:")
+        self.label_lægeid.pack(pady=10)
+        self.entry_id = ttk.Entry(self.logind_frame)
+        self.entry_id.pack(pady=5)
+        #Læge ID label til logind framen
+        self.label_adgangskode = ttk.Label(self.logind_frame, text="Adgangskode:")
+        self.label_adgangskode.pack(pady=10)
+        self.entry_password = ttk.Entry(self.logind_frame, show="*")
+        self.entry_password.pack(pady=5)
+        # Adgangskode label til logind framen
+        self.login_button = ttk.Button(self.logind_frame, text="Logind", command=self.login)
+        self.login_button.pack(pady=20)
+        #Logind knap i login frame
+
+        self.frame_ekg = None
+
+        self.protocol("WM_DELETE_WINDOW", self.logind_luk)
+    def logind_luk(self):
+        if self.frame_ekg:
+            self.sensor.database_thread.stop()
+            self.sensor.database_thread.join()
+        self.destroy()
+        #Lukker Logindframen
+    def login(self):
+        Læge_id = self.entry_id.get()
+        Adgangskode = self.entry_password.get()
+
+        if Læge_id == "02" and Adgangskode == "1234":
+            self.logind_frame.pack_forget()
+            self.frame_ekg = ttk.Frame(self.frame)
+            self.frame_ekg.pack(fill='both', expand=True)
+            self.patient_data_button = ttk.Button(self.frame_ekg, text="Patient Data", width=40, command=self.display_patient_data)
+            self.patient_data_button.pack(pady=10, padx=20, anchor="n")
+            self.simulation_button = ttk.Button(self.frame_ekg, text="EKG", width=40, command=self.simulation_click)
+            self.simulation_button.pack(pady=20, padx=20, anchor="n")
+
+            self.conn = sqlite3.connect("ekg_database.db")
+            self.create_table()
+        else:
+            messagebox.showinfo("Fejl", "Forkert læge-ID eller adgangskode.")
+            #Metoden for logind
+
+    def create_table(self):
+        query = '''CREATE TABLE IF NOT EXISTS patient (
+                    cpr INTEGER PRIMARY KEY,
+                    navn TEXT,
+                    alder INTEGER,
+                    diagnose TEXT
+                )'''
+        self.conn.execute(query)
+        self.conn.commit()
+        #Funktion til at lave databasen
+
+    def insert_patient_data(self, cpr, navn, alder, diagnose):
+        cpr = "".join(filter(str.isdigit, cpr))
+        cpr = int(cpr)
+        query = "INSERT INTO patient (cpr, navn, alder, diagnose) VALUES (?, ?, ?, ?)"
+        self.conn.execute(query, (cpr, navn, alder, diagnose))
+        self.conn.commit()
+        #funktion til indsættelse af patient dataen
+
+    def display_patient_data(self):
+        query = "SELECT * FROM patient"
+        result = self.conn.execute(query).fetchall()
+        popup = tk.Toplevel()
+        popup.title("Patient Data")
+        popup.geometry("800x300")
+        tree = ttk.Treeview(popup, columns=("cpr", "navn", "alder", "diagnose"), show="headings")
+        tree.heading("cpr", text="CPR")
+        tree.heading("navn", text="Navn")
+        tree.heading("alder", text="Alder")
+        tree.heading("diagnose", text="Diagnose")
+        tree.pack(fill="both", expand=True)
+        #Displayer patienterne i tkinter frame, fra databasen af
+
+        def tilføj_patient():
+            cpr = simpledialog.askstring("CPR", "Indtast CPR:")
+            navn = simpledialog.askstring("Navn", "Indtast navn:")
+            alder = simpledialog.askinteger("Alder", "Indtast alder:")
+            diagnose = simpledialog.askstring("Diagnose", "Indtast diagnose:")
+            self.insert_patient_data(cpr, navn, alder, diagnose)
+            messagebox.showinfo("Patienten er tilføjet")
+            tree.insert("", "end", values=(cpr, navn, alder, diagnose))
+            #Funktion til at tilføje nye patienter til databasen vha button.
+
+        tilføjpatient_button = ttk.Button(popup, text="Tilføj Patient", command=lambda: tilføj_patient())
+        tilføjpatient_button.pack(pady=10)
+        for row in result:
+            tree.insert("", "end", values=row)
+
+    def simulation_click(self):
+
+        self.sensor = Sensor()
+        self.sensor.start()
+        self.data_plotter = Grafklasse(self.sensor.list_manager)
+        self.data_plotter.start()
+        simulationsvindue = tk.Toplevel()
+        simulationsvindue.title("Simulering")
+        simulationsvindue.geometry("600x300")
+
+        cpr = simpledialog.askstring("CPR", "Indtast CPR:")
+        query = "SELECT navn FROM patient WHERE cpr=?"
+        result = self.conn.execute(query, (cpr,)).fetchone()
+
+        if result is not None:
+            navn = result[0]
+            label = ttk.Label(simulationsvindue, text=f"Hej {navn}, her er dit EKGData")
+            label.pack(pady=20)
+            start_ekg_måling_button = ttk.Button(simulationsvindue, text="Start EKG Måling", command=self.start_ekg_måling)
+            start_ekg_måling_button.pack(pady=10)
+        else:
+            messagebox.showinfo("Fejl", "Ingen patient fundet med det angivne CPR.")
+
+    def start_ekg_måling(self):
+        messagebox.showinfo("EKG Måling", "EKG Måling er startet.")
+
+    def __del__(self):
+        if self.frame_ekg:
+            self.sensor.database_thread.stop()
+            self.sensor.database_thread.join()
+
+
+
+if __name__ == "__main__":
+    mainvindue = Mainvindue()
+    mainvindue.mainloop()
