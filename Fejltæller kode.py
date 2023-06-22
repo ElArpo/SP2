@@ -2,14 +2,14 @@ import serial
 
 def read_data_from_arduino():
 
-    serial_port = serial.Serial(port='COM5', baudrate=38400, timeout=1)  # Tilpas port og baudrate efter behov
+    serial_port = serial.Serial(port='COM5', baudrate=38400, timeout=1)  
 
     data = []
     errors = 0
     last_value = None
 
     while len(data) < 4000:
-        line = serial_port.readline().decode().strip()  # Læs en linje fra Arduinoen
+        line = serial_port.readline().decode().strip() 
         try:
             value = int(line)
             print(value)
@@ -19,7 +19,7 @@ def read_data_from_arduino():
             data.append(value)
             last_value = value
         except ValueError:
-            pass  # Håndter fejl i dataformat
+            pass  
 
     if errors > 0:
         print(f"Der opstod {errors} fejl i data.")
@@ -28,5 +28,4 @@ def read_data_from_arduino():
 
     return data
 
-# Kør funktionen for at læse data fra Arduinoen
 arduino_data = read_data_from_arduino()
